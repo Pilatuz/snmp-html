@@ -1,2 +1,1 @@
-# snmp-html
-Show snmp object on web page
+Simple server that translates some SNMP objects into simple web-page.
