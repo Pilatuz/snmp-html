@@ -20,3 +20,15 @@
 #  name = "github.com/x/y"
 #  version = "2.4.0"
 
+
+[[constraint]]
+  name = "github.com/soniah/gosnmp"
+  branch = "master"
+
+[[constraint]]
+  name = "gopkg.in/tylerb/graceful.v1"
+  version = "1.2.15"
+
+[[constraint]]
+  branch = "v2"
+  name = "gopkg.in/yaml.v2"

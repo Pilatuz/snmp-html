@@ -2,6 +2,12 @@
 
 
 [[projects]]
+  branch = "master"
+  name = "github.com/soniah/gosnmp"
+  packages = ["."]
+  revision = "90eb00b72db61f5fa9c57c96ea75f8a769cf86d1"
+
+[[projects]]
   name = "gopkg.in/tylerb/graceful.v1"
   packages = ["."]
   revision = "4654dfbb6ad53cb5e27f37d99b02e16c1872fbbb"
@@ -16,6 +22,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "e9b806bae35c1fef4bc7d4f7bf83c1d5786f889d4b7e534cadcecdb3b8e7de1f"
+  inputs-digest = "853089655765dc405caeb412bb1cf135287ed408d14d82a95832becc7f8d1d95"
   solver-name = "gps-cdcl"
   solver-version = 1

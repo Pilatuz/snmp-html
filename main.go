@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	snmp "github.com/soniah/gosnmp"
 	"gopkg.in/tylerb/graceful.v1"
 	"gopkg.in/yaml.v2"
 )
@@ -38,6 +39,9 @@ type Config struct {
 
 	// SNMP options
 	Snmp struct {
+		Target    string `json:"target,omitempty" yaml:"target,omitempty"`
+		Port      int    `json:"port,omitempty" yaml:"port,omitempty"`
+		Community string `json:"community,omitempty" yaml:"community,omitempty"`
 	} `json:"snmp,omitempty" yaml:"snmp,omitempty"`
 }
 
@@ -101,6 +105,8 @@ func main() {
 			}
 		}()
 	}
+
+	service.startSNMP()
 
 	// catch common signals
 	sigCh := make(chan os.Signal, 4)
@@ -241,6 +247,48 @@ func (s *Service) restGetVersion(w http.ResponseWriter, r *http.Request) {
 			"GitHash":   GitHash,
 			"BuildTime": BuildTime,
 		})
+}
+
+// run snmp service processing
+func (s *Service) startSNMP() {
+	// Build our own GoSNMP struct, rather than using g.Default.
+	// Do verbose logging of packets.
+	params := &snmp.GoSNMP{
+		Target:    s.cfg.Snmp.Target,
+		Port:      uint16(s.cfg.Snmp.Port),
+		Community: s.cfg.Snmp.Community,
+		Version:   snmp.Version2c,
+		Timeout:   20 * time.Second,
+		Retries:   5,
+	}
+
+	if err := params.Connect(); err != nil {
+		log.Fatalf("Connect() err: %v", err)
+	}
+	defer params.Conn.Close()
+
+	oids := []string{"1.3.6.1.2.1.2.1", "1.3.6.1.2.1.2"}
+	result, err := params.Get(oids) // Get() accepts up to g.MAX_OIDS
+	if err != nil {
+		log.Fatalf("Get() err: %v", err)
+	}
+
+	for i, variable := range result.Variables {
+		fmt.Printf("%d: oid: %s ", i, variable.Name)
+
+		// the Value of each variable returned by Get() implements
+		// interface{}. You could do a type switch...
+		switch variable.Type {
+		case snmp.OctetString:
+			fmt.Printf("string: %s\n", string(variable.Value.([]byte)))
+
+		default:
+			// ... or often you're just interested in numeric values.
+			// ToBigInt() will return the Value as a BigInt, for plugging
+			// into your calculations.
+			fmt.Printf("number: %d\n", snmp.ToBigInt(variable.Value))
+		}
+	}
 }
 
 // write JSON data (without panics)
