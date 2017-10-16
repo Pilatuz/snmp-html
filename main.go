@@ -37,12 +37,18 @@ type Config struct {
 		Headers map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
 	} `json:"http,omitempty" yaml:"http,omitempty"`
 
-	// SNMP options
-	Snmp struct {
-		Target    string `json:"target,omitempty" yaml:"target,omitempty"`
-		Port      int    `json:"port,omitempty" yaml:"port,omitempty"`
-		Community string `json:"community,omitempty" yaml:"community,omitempty"`
-	} `json:"snmp,omitempty" yaml:"snmp,omitempty"`
+	// SNMP targets
+	Snmp []SnmpTarget
+}
+
+// one SNMP target
+type SnmpTarget struct {
+	Name      string `json:"name" yaml:"name"`
+	Target    string `json:"target,omitempty" yaml:"target,omitempty"`
+	Port      int    `json:"port,omitempty" yaml:"port,omitempty"`
+	Community string `json:"community,omitempty" yaml:"community,omitempty"`
+	Version   string `json:"version,omitempty" yaml:"version,omitempty"`
+	// TODO: allowed OID (read, write)
 }
 
 // LoadConfig loads configuration file
@@ -61,6 +67,17 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 
 	return cfg, nil // OK
+}
+
+// find SNMP target by name
+func (cfg *Config) findSnmpTargetByName(name string) *SnmpTarget {
+	for i := range cfg.Snmp {
+		if cfg.Snmp[i].Name == name {
+			return &cfg.Snmp[i]
+		}
+	}
+
+	return nil // not found
 }
 
 // daemon's entry point
@@ -105,8 +122,6 @@ func main() {
 			}
 		}()
 	}
-
-	service.startSNMP()
 
 	// catch common signals
 	sigCh := make(chan os.Signal, 4)
@@ -223,6 +238,7 @@ func NewService(cfg *Config) *Service {
 
 	// install all handlers
 	s.HandleFunc("/api/version", s.restGetVersion)
+	s.HandleFunc("/api/snmp", s.restSnmp)
 
 	return s // OK
 }
@@ -249,45 +265,214 @@ func (s *Service) restGetVersion(w http.ResponseWriter, r *http.Request) {
 		})
 }
 
-// run snmp service processing
-func (s *Service) startSNMP() {
-	// Build our own GoSNMP struct, rather than using g.Default.
-	// Do verbose logging of packets.
-	params := &snmp.GoSNMP{
-		Target:    s.cfg.Snmp.Target,
-		Port:      uint16(s.cfg.Snmp.Port),
-		Community: s.cfg.Snmp.Community,
-		Version:   snmp.Version2c,
-		Timeout:   20 * time.Second,
-		Retries:   5,
+// GET or PUT /snmp
+func (s *Service) restSnmp(w http.ResponseWriter, r *http.Request) {
+	defer checkPanic(w)
+	checkMethod(r, "GET", "PUT")
+	s.applyHeaders(w)
+
+	switch r.Method {
+	case "GET":
+		s._restGetSnmp(w, r)
+	case "PUT":
+		s._restPutSnmp(w, r)
 	}
 
-	if err := params.Connect(); err != nil {
-		log.Fatalf("Connect() err: %v", err)
-	}
-	defer params.Conn.Close()
+}
 
-	oids := []string{"1.3.6.1.2.1.2.1", "1.3.6.1.2.1.2"}
-	result, err := params.Get(oids) // Get() accepts up to g.MAX_OIDS
-	if err != nil {
-		log.Fatalf("Get() err: %v", err)
-	}
+// GET /snmp
+func (s *Service) _restGetSnmp(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 
-	for i, variable := range result.Variables {
-		fmt.Printf("%d: oid: %s ", i, variable.Name)
+	var res []interface{}
+	for _, name := range q["name"] {
+		if target := s.cfg.findSnmpTargetByName(name); target != nil {
+			// prepare worker
+			w := &snmp.GoSNMP{
+				Target:    target.Target,
+				Port:      uint16(target.Port),
+				Community: target.Community,
+				Version:   mustParseSnmpVersion(target.Version),
+				Timeout:   20 * time.Second,
+				Retries:   6,
+			}
 
-		// the Value of each variable returned by Get() implements
-		// interface{}. You could do a type switch...
-		switch variable.Type {
-		case snmp.OctetString:
-			fmt.Printf("string: %s\n", string(variable.Value.([]byte)))
+			// try to connect
+			if err := w.Connect(); err != nil {
+				panic(NewHttpErrorf(http.StatusInternalServerError,
+					"failed to connect SNMP agent %s:%d: %s",
+					target.Target, target.Port, err))
+			}
+			defer w.Conn.Close()
 
-		default:
-			// ... or often you're just interested in numeric values.
-			// ToBigInt() will return the Value as a BigInt, for plugging
-			// into your calculations.
-			fmt.Printf("number: %d\n", snmp.ToBigInt(variable.Value))
+			// GET requested OIDs
+			result, err := w.Get(q["oid"]) // up to snmp.MAX_OIDS
+			if err != nil {
+				panic(NewHttpErrorf(http.StatusInternalServerError,
+					"failed to do SNMP/GET to %s:%d: %s",
+					target.Target, target.Port, err))
+			}
+
+			// report all variables
+			var values []interface{}
+			for _, v := range result.Variables {
+				values = append(values,
+					map[string]interface{}{
+						"oid":   v.Name,
+						"type":  snmpTypeAsString(v.Type),
+						"value": snmpGoValue(v.Type, v.Value),
+					})
+			}
+
+			res = append(res,
+				map[string]interface{}{
+					"name":   name,
+					"values": values,
+				})
+		} else {
+			panic(NewHttpErrorf(http.StatusBadRequest,
+				"no configured %s SNMP target found", name))
 		}
+	}
+
+	writeJson(w, http.StatusOK, res)
+}
+
+// PUT /snmp
+func (s *Service) _restPutSnmp(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+
+	// TODO: get JSON body and convert it snmp.PDU
+	panic(NewHttpError(http.StatusNotImplemented,
+		"PUT not implemented yet"))
+
+	var res []interface{}
+	for _, name := range q["name"] {
+		if target := s.cfg.findSnmpTargetByName(name); target != nil {
+			// prepare worker
+			w := &snmp.GoSNMP{
+				Target:    target.Target,
+				Port:      uint16(target.Port),
+				Community: target.Community,
+				Version:   mustParseSnmpVersion(target.Version),
+				Timeout:   20 * time.Second,
+				Retries:   6,
+			}
+
+			// try to connect
+			if err := w.Connect(); err != nil {
+				panic(NewHttpErrorf(http.StatusInternalServerError,
+					"failed to connect SNMP agent %s:%d: %s",
+					target.Target, target.Port, err))
+			}
+			defer w.Conn.Close()
+
+			// GET requested OIDs
+			/*
+				result, err := w.Set(q["oid"]) // up to snmp.MAX_OIDS
+				if err != nil {
+					panic(NewHttpErrorf(http.StatusInternalServerError,
+						"failed to do SNMP/GET to %s:%d: %s",
+						target.Target, target.Port, err))
+				}
+
+				// report all variables
+				var values []interface{}
+				for _, v := range result.Variables {
+					values = append(values,
+						map[string]interface{}{
+							"oid":   v.Name,
+							"type":  snmpTypeAsString(v.Type),
+							"value": snmpGoValue(v.Type, v.Value),
+						})
+				}
+
+				res = append(res,
+					map[string]interface{}{
+						"name":   name,
+						"values": values,
+					})
+			*/
+		} else {
+			panic(NewHttpErrorf(http.StatusBadRequest,
+				"no configured %s SNMP target found", name))
+		}
+	}
+
+	writeJson(w, http.StatusOK, res)
+}
+
+// parse SNMP version string
+func mustParseSnmpVersion(version string) snmp.SnmpVersion {
+	switch version {
+	case "1":
+		return snmp.Version1
+	case "2c", "": // by default use "2c"
+		return snmp.Version2c
+	case "3":
+		return snmp.Version3
+	}
+
+	panic(NewHttpErrorf(http.StatusBadRequest,
+		"%q unknown SNMP version", version))
+}
+
+// SNMP type to string
+func snmpTypeAsString(t snmp.Asn1BER) string {
+	switch t {
+	case snmp.UnknownType:
+		return "unknown"
+	case snmp.Boolean:
+		return "bool"
+	case snmp.Integer:
+		return "int"
+	case snmp.BitString:
+		return "bit-string"
+	case snmp.OctetString:
+		return "octet-string"
+	case snmp.Null:
+		return "null"
+	case snmp.ObjectIdentifier:
+		return "oid"
+	case snmp.ObjectDescription:
+		return "desc"
+	case snmp.IPAddress:
+		return "ip"
+	case snmp.Counter32:
+		return "counter32"
+	case snmp.Gauge32:
+		return "gauge32"
+	case snmp.TimeTicks:
+		return "time-ticks"
+	case snmp.Opaque:
+		return "opaque"
+	case snmp.NsapAddress:
+		return "nsap"
+	case snmp.Counter64:
+		return "counter64"
+	case snmp.Uinteger32:
+		return "uint32"
+	case snmp.NoSuchObject:
+		return "no obj"
+	case snmp.NoSuchInstance:
+		return "no inst"
+	case snmp.EndOfMibView:
+		return "end of MIB"
+	}
+
+	return fmt.Sprintf("#%02x", t)
+}
+
+// get appropariate Go-typed value
+func snmpGoValue(t snmp.Asn1BER, v interface{}) interface{} {
+	switch t {
+	case snmp.OctetString:
+		return string(v.([]byte))
+
+	// TODO: more types here!!!
+
+	default:
+		return snmp.ToBigInt(v)
 	}
 }
 
